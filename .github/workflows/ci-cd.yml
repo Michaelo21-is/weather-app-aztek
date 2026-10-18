@@ -1,0 +1,209 @@
+name: CI/CD
+
+# Pull requests: tests, lint, production build and Terraform validation.
+# Pushes to main: the same checks, then build the changed images, push them to ACR and deploy them to App Service.
+# Azure access uses OpenID Connect (no stored credentials); the identity may only push images and update the two apps.
+# Infrastructure changes are applied with infra/scripts/tf.sh, not from CI (see docs/azure-deployment.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  # Superseded pull request runs can go; a production deployment always runs to completion.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: weather
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: weatherdb
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U weather -d weatherdb"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      DATABASE_HOST: localhost
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: weatherdb
+      DATABASE_USERNAME: weather
+      DATABASE_PASSWORD: ci-only-password
+      REDIS_HOST: localhost
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ""
+      JWT_SECRET: ci-only-jwt-secret-of-at-least-32-chars
+      OPEN_WEATHER_API: ci-placeholder
+      WEBSITE_URL: http://localhost:3000
+      # The Flyway migrations must produce exactly the schema the JPA entities expect.
+      SPRING_JPA_HIBERNATE_DDL_AUTO: validate
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - run: ./mvnw -B verify
+
+  frontend:
+    name: Frontend lint and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run build
+
+  infra:
+    name: Terraform and scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.6"
+      - run: terraform fmt -check -recursive infra/terraform
+      - run: terraform -chdir=infra/terraform init -backend=false -input=false
+      - run: terraform -chdir=infra/terraform validate
+      - run: bash -n infra/scripts/*.sh infra/bootstrap/*.sh redis/start-redis.sh
+      - run: python3 -m py_compile infra/scripts/smoke_test.py
+
+  images:
+    name: Build and push images
+    needs: [backend, frontend, infra]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      web: ${{ steps.tags.outputs.web }}
+      api: ${{ steps.tags.outputs.api }}
+      redis: ${{ steps.tags.outputs.redis }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # Each image is tagged with the last commit that changed its directory: unchanged components are neither
+      # rebuilt nor redeployed.
+      - id: tags
+        run: |
+          {
+            echo "web=$(git log -1 --format=%H -- frontend)"
+            echo "api=$(git log -1 --format=%H -- backend)"
+            echo "redis=$(git log -1 --format=%H -- redis)"
+          } >> "$GITHUB_OUTPUT"
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - run: az acr login --name "${{ vars.ACR_NAME }}"
+      - id: missing
+        run: |
+          for pair in "web:weather-web:${{ steps.tags.outputs.web }}" "api:weather-api:${{ steps.tags.outputs.api }}" \
+                      "redis:weather-redis:${{ steps.tags.outputs.redis }}"; do
+            key="${pair%%:*}"; image="${pair#*:}"
+            if az acr manifest show --registry "${{ vars.ACR_NAME }}" --name "$image" -o none 2>/dev/null; then
+              echo "$key=false" >> "$GITHUB_OUTPUT"; echo "$image already in ACR"
+            else
+              echo "$key=true" >> "$GITHUB_OUTPUT"; echo "$image will be built"
+            fi
+          done
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - if: steps.missing.outputs.web == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: frontend
+          push: true
+          tags: |
+            ${{ vars.ACR_NAME }}.azurecr.io/weather-web:${{ steps.tags.outputs.web }}
+            ${{ vars.ACR_NAME }}.azurecr.io/weather-web:latest
+          cache-from: type=gha,scope=weather-web
+          cache-to: type=gha,mode=max,scope=weather-web
+      - if: steps.missing.outputs.api == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: backend
+          push: true
+          tags: |
+            ${{ vars.ACR_NAME }}.azurecr.io/weather-api:${{ steps.tags.outputs.api }}
+            ${{ vars.ACR_NAME }}.azurecr.io/weather-api:latest
+          cache-from: type=gha,scope=weather-api
+          cache-to: type=gha,mode=max,scope=weather-api
+      - if: steps.missing.outputs.redis == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: redis
+          push: true
+          tags: |
+            ${{ vars.ACR_NAME }}.azurecr.io/weather-redis:${{ steps.tags.outputs.redis }}
+            ${{ vars.ACR_NAME }}.azurecr.io/weather-redis:latest
+          cache-from: type=gha,scope=weather-redis
+          cache-to: type=gha,mode=max,scope=weather-redis
+
+  deploy:
+    name: Deploy to App Service
+    needs: images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+      REGISTRY: ${{ vars.ACR_NAME }}.azurecr.io
+      WEB_APP: ${{ vars.WEB_APP_NAME }}
+      API_APP: ${{ vars.API_APP_NAME }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy changed containers
+        env:
+          WEB_IMAGE: weather-web:${{ needs.images.outputs.web }}
+          API_IMAGE: weather-api:${{ needs.images.outputs.api }}
+          REDIS_IMAGE: weather-redis:${{ needs.images.outputs.redis }}
+        run: infra/scripts/deploy-images.sh
+      - name: Smoke test through Cloudflare
+        run: |
+          # Give the restarted containers up to 5 minutes to become healthy.
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null "${{ vars.PUBLIC_URL }}/healthz" && curl -fsS -o /dev/null "${{ vars.PUBLIC_URL }}/api/csrf"; then
+              break
+            fi
+            sleep 10
+          done
+          python3 infra/scripts/smoke_test.py "${{ vars.PUBLIC_URL }}"

@@ -1,0 +1,7 @@
+# Copy to backend.hcl (git-ignored) with the storage account printed by infra/bootstrap/create-state-storage.sh,
+# then: infra/scripts/tf.sh init -backend-config=backend.hcl
+resource_group_name  = "terraform-state-rg"
+storage_account_name = "<from create-state-storage.sh>"
+container_name       = "tfstate"
+key                  = "weather-prod.tfstate"
+use_azuread_auth     = true

@@ -1,0 +1,20 @@
+# Secrets: never part of the build context (NEXT_PUBLIC_* values would be baked into the bundle)
+.env
+.env.*
+
+# Installed and built inside the image
+node_modules/
+.next/
+out/
+build/
+coverage/
+
+# Not needed in the image
+.git/
+.gitignore
+.vscode/
+.idea/
+*.log
+*.md
+Dockerfile
+.dockerignore

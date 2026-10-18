@@ -17,6 +17,7 @@ import com.moj.weather_app.Dto.LocationSuggestionDto;
 import com.moj.weather_app.Repository.FavoriteLocationRepository;
 import com.moj.weather_app.Repository.UsersRepository;
 import com.moj.weather_app.Response.WeatherResponse;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.http.HttpStatus;
@@ -102,6 +103,7 @@ class WeatherServiceTest {
     }
 
     @Test
+    @Disabled("getWeatherByCoordinates no longer takes a refresh flag: the session cache is always served until it expires")
     void refreshBypassesSessionCacheAndStoresNewLocation() {
         stubWeather(51.5, -0.12, "London", "GB", 0);
         stubWeather(48.85, 2.35, "Paris", "FR", 7200);

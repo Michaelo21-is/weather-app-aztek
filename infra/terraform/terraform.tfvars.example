@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars (git-ignored). Secrets are NOT set here: infra/scripts/tf.sh loads them from backend/.env.
+subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# Alerts and the monthly budget notify this address (leave empty to skip both).
+alert_email        = ""
+monthly_budget_usd = 45
+
+# Second step, after the asuid TXT record and the origin certificate exist (see docs/azure-deployment.md).
+custom_domain_enabled = false
+
+# Temporarily reach the web app without Cloudflare, e.g. ["203.0.113.7/32"]. Keep empty in normal operation.
+extra_allowed_ips = []

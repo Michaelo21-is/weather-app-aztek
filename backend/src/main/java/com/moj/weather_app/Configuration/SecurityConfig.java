@@ -28,7 +28,9 @@ public class SecurityConfig {
             "/api/auth/sign-out",
             "/api/csrf",
             // Error dispatches must stay public, otherwise e.g. a 409 from sign-up turns into a 401.
-            "/error"
+            "/error",
+            // Platform health probes. Only /api/** is proxied by the frontend, so this is not reachable publicly.
+            "/actuator/health/**"
     };
 
     @Bean

@@ -65,7 +65,7 @@ class WeatherSessionWebTest {
 
     @Test
     void anonymousVisitorGetsSessionCookieOnFirstRequest() throws Exception {
-        MockHttpServletResponse response = mockMvc.perform(get("/api/weather/locations").param("query", "Lon"))
+        MockHttpServletResponse response = mockMvc.perform(get("/api/weather/city-suggestion").param("query", "Lon"))
                 .andExpect(status().isOk())
                 .andReturn().getResponse();
 
@@ -157,11 +157,11 @@ class WeatherSessionWebTest {
     void invalidParametersAreRejectedBeforeReachingTheService() throws Exception {
         mockMvc.perform(get("/api/weather/coordinates").param("lat", "91").param("lon", "0"))
                 .andExpect(status().isBadRequest());
-        mockMvc.perform(get("/api/weather/city").param("name", "London").param("country", "GBR"))
+        mockMvc.perform(get("/api/weather/city").param("cityName", "London").param("countryName", "GBR"))
                 .andExpect(status().isBadRequest());
-        mockMvc.perform(get("/api/weather/locations").param("query", "L"))
+        mockMvc.perform(get("/api/weather/city-suggestion").param("query", "L"))
                 .andExpect(status().isBadRequest());
-        mockMvc.perform(get("/api/weather/locations").param("query", "Lon{x}"))
+        mockMvc.perform(get("/api/weather/city-suggestion").param("query", "Lon{x}"))
                 .andExpect(status().isBadRequest());
 
         verify(weatherService, never()).getWeatherByCoordinates(anyString(), anyDouble(), anyDouble());

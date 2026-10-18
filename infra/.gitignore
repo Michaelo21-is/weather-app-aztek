@@ -1,0 +1,27 @@
+# Terraform working files and state (state lives in the remote backend; never commit local copies)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Environment-specific values (copy the .example files)
+*.tfvars
+!*.tfvars.example
+backend.hcl
+!backend.hcl.example
+
+# Certificates and keys produced by import-origin-certificate.sh (normally deleted automatically)
+*.pem
+*.key
+*.csr
+*.pfx
+
+# Python bytecode from running the scripts
+__pycache__/

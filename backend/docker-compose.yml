@@ -1,0 +1,91 @@
+name: weather-app
+
+services:
+  weather-app:
+    build: .
+    image: weather-app:latest
+    container_name: weather-app
+    env_file: .env
+    environment:
+      # Local development: lets Hibernate create/update the schema (see application-local.properties).
+      SPRING_PROFILES_ACTIVE: local
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: weather-postgres
+    environment:
+      POSTGRES_USER: ${DATABASE_USERNAME}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+      # Only applied when the volume is empty; postgres-init covers existing volumes.
+      POSTGRES_DB: ${DATABASE_NAME}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      default:
+        # Hostname used by DATABASE_HOST in .env.
+        aliases: [weather-postgres]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # One-shot job: creates DATABASE_NAME if it is missing (e.g. a volume initialized under another name).
+  # Idempotent and never drops anything, so it is safe on every start.
+  postgres-init:
+    image: postgres:17-alpine
+    container_name: weather-postgres-init
+    environment:
+      PGHOST: weather-postgres
+      PGUSER: ${DATABASE_USERNAME}
+      PGPASSWORD: ${DATABASE_PASSWORD}
+      DATABASE_NAME: ${DATABASE_NAME}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        psql -v ON_ERROR_STOP=1 -v db="$$DATABASE_NAME" -d postgres <<'SQL'
+        SELECT format('CREATE DATABASE %I', :'db')
+        WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = :'db')\gexec
+        SQL
+    restart: "no"
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: weather-redis
+    # Exec form: the password is passed as a single argument, so its special characters are not shell-parsed.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
+    environment:
+      # Lets redis-cli (healthcheck) authenticate without putting the password on the command line.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    networks:
+      default:
+        # Hostname used by REDIS_HOST in .env.
+        aliases: [redis-cache]
+    healthcheck:
+      # redis-cli exits 0 even on auth errors, so require an actual PONG.
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:

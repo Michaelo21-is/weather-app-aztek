@@ -1,0 +1,21 @@
+# Secrets: injected at runtime by docker compose, never baked into the image
+.env
+.env.*
+
+# Build output and IDE files
+target/
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+
+# Not needed in the image
+.git/
+.gitignore
+.gitattributes
+HELP.md
+mvnw.cmd
+Dockerfile
+.dockerignore
+docker-compose.yml

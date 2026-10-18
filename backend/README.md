@@ -1,6 +1,9 @@
 # Weather App — Backend
 
-Backend for a weather application. The **authentication system** is the part implemented so far: sign up, sign in, cookie-based JWT authentication, token refresh with rotation, sign out, CSRF protection and brute-force protection.
+Backend for a weather application. It has two parts:
+
+- **Authentication system:** sign up, sign in, cookie-based JWT authentication, token refresh with rotation, sign out, CSRF protection and brute-force protection.
+- **Weather service:** weather by city or coordinates, city autocomplete and per-user favorite locations, cached in Redis.
 
 ## Tech Stack
 
@@ -9,8 +12,9 @@ Backend for a weather application. The **authentication system** is the part imp
 | Java 17 · Spring Boot 4.1 | Application framework (Spring Web MVC) |
 | Spring Security | Filter chain, CSRF, CORS, authorization |
 | JJWT 0.13 | Signing and validating JWTs (HS256) |
-| Spring Data JPA · PostgreSQL 17 | Users and refresh tokens |
-| Spring Data Redis · Redis 7.4 | Failed-login counters and IP blocks |
+| Spring Data JPA · PostgreSQL 17 | Users, refresh tokens and favorite locations |
+| Spring Data Redis · Redis 7.4 | Failed-login counters, IP blocks and weather cache |
+| OpenWeather · Open-Meteo | Weather data and geocoding · city autocomplete |
 | BCrypt | Password hashing |
 | Docker · Docker Compose | Multi-stage image and local stack |
 | Maven · Lombok | Build and boilerplate reduction |
@@ -205,6 +209,213 @@ Sign out always succeeds and clears the cookies. The access token is stateless, 
 
 ---
 
+## Weather Service Flows
+
+> `WeatherController` → `WeatherService` → `OpenWeatherClient` / `LocationAutocompleteClient` (external APIs), `RedisService` (cache) and `FavoriteLocationRepository` (PostgreSQL). Invalid query parameters are rejected with **400** before any cache or provider access.
+
+### 1. Weather by City — `GET /api/weather/city`
+
+```mermaid
+stateDiagram-v2
+    [*] --> ValidateParams : cityName, countryName
+    ValidateParams --> BadRequest400 : blank, too long, bad characters, or country not 2 letters
+    ValidateParams --> GeocodeCache : valid
+    GeocodeCache --> CityCache : hit
+    GeocodeCache --> Geocode : miss
+    Geocode --> NotFound404 : no result in the requested country
+    Geocode --> ProviderError : call failed
+    Geocode --> CityCache : pick best match, cache 7d
+    CityCache --> Ok200 : hit
+    CityCache --> FetchWeather : miss
+    FetchWeather --> ProviderError : call failed
+    FetchWeather --> Ok200 : map response, cache until next full local hour
+    BadRequest400 --> [*]
+    NotFound404 --> [*]
+    ProviderError --> [*]
+    Ok200 --> [*]
+```
+
+- **Best match:** results are filtered to the requested country. A result named exactly like the query (ignoring case and accents, also checking `local_names`) wins. Otherwise the geocoder's first result is used.
+- The city cache key is the geocoded coordinates (4 decimals), so all visitors share it. The response uses the geocoded name, not the weather API's district name.
+- `FetchWeather` calls OpenWeather **current weather** and then the **5 day / 3 hour forecast**. If either call fails, the request fails.
+
+### 2. Weather by Location — `GET /api/weather/coordinates`
+
+```mermaid
+stateDiagram-v2
+    [*] --> SessionFilter
+    SessionFilter --> IssueSession : weather_session cookie missing or malformed
+    SessionFilter --> ValidateParams : valid cookie
+    IssueSession --> ValidateParams : new random ID, Set-Cookie
+    ValidateParams --> BadRequest400 : lat or lon out of range
+    ValidateParams --> SessionCache : valid
+    SessionCache --> Ok200 : hit, request coordinates ignored
+    SessionCache --> FetchWeather : miss
+    FetchWeather --> ProviderError : call failed
+    FetchWeather --> Ok200 : map response, cache until next full local hour
+    BadRequest400 --> [*]
+    ProviderError --> [*]
+    Ok200 --> [*]
+```
+
+The cache is keyed by the visitor's weather session, not by coordinates. While the entry is valid (until the next full local hour), new coordinates from the same visitor return the cached location.
+
+### 3. Redis Cache Hit / Miss
+
+Used by every cached lookup: session weather, city weather, geocoding and autocomplete.
+
+```mermaid
+stateDiagram-v2
+    [*] --> ReadCache : GET key
+    ReadCache --> Hit : JSON found
+    ReadCache --> Miss : key absent
+    ReadCache --> ReadFailed : Redis unreachable or unreadable JSON
+    ReadFailed --> Miss : log warning, treat as miss
+    Hit --> [*] : return cached value
+    Miss --> CallProvider
+    CallProvider --> ProviderError : call failed, nothing cached
+    CallProvider --> WriteCache : success
+    WriteCache --> Returned : SET with TTL
+    WriteCache --> WriteFailed : Redis or JSON error
+    WriteFailed --> Returned : log warning
+    Returned --> [*] : return fresh value
+    ProviderError --> [*]
+```
+
+A Redis outage does not break the weather endpoints. Every request just goes to the provider instead.
+
+| Redis key | Value | TTL |
+|---|---|---|
+| `weather:session:<sessionId>` | Weather for the visitor's location | Until the next full hour in the location's timezone |
+| `weather:city:<lat>,<lon>` | Weather for a city, shared by all visitors | Until the next full hour in the location's timezone |
+| `weather:geocode:<CC>:<city>` | Resolved city (name, state, country, coordinates) | `weather.geocoding-ttl` (7d) |
+| `weather:locations:<prefix>` | Autocomplete suggestions (also an empty list) | `weather.autocomplete-ttl` (24h) |
+
+### 4. External API Calls and Error Mapping
+
+Every outgoing call goes through `ExternalApiCall.execute` (connect timeout 3s, read timeout 5s, no retries).
+
+```mermaid
+stateDiagram-v2
+    [*] --> SendRequest
+    SendRequest --> CheckBody : 2xx
+    SendRequest --> Unavailable503 : provider returned 429
+    SendRequest --> BadGateway502 : other HTTP error or unparseable body
+    SendRequest --> GatewayTimeout504 : timeout or I/O error
+    CheckBody --> BadGateway502 : empty body
+    CheckBody --> Success : body present
+    Success --> [*]
+    Unavailable503 --> [*]
+    BadGateway502 --> [*]
+    GatewayTimeout504 --> [*]
+```
+
+| Provider | Endpoint | Used for |
+|---|---|---|
+| OpenWeather | `/data/2.5/weather` | Current weather |
+| OpenWeather | `/data/2.5/forecast` | 5 day / 3 hour forecast |
+| OpenWeather | `/geo/1.0/direct` (limit 5) | City → coordinates |
+| Open-Meteo | `/v1/search` (no key) | City autocomplete |
+
+The OpenWeather key is added as `appid` on the server. Exception messages are never logged, because they contain the request URL with the key.
+
+### 5. City Autocomplete — `GET /api/weather/city-suggestion`
+
+```mermaid
+stateDiagram-v2
+    [*] --> ValidateParams : query
+    ValidateParams --> BadRequest400 : under 2 or over 60 chars, or bad characters
+    ValidateParams --> SuggestionCache : valid
+    SuggestionCache --> Ok200 : hit
+    SuggestionCache --> SearchOpenMeteo : miss
+    SearchOpenMeteo --> ProviderError : call failed
+    SearchOpenMeteo --> FilterResults : up to 10 candidates
+    FilterResults --> Ok200 : true prefix matches, deduplicated, max 5, cache 24h
+    BadRequest400 --> [*]
+    ProviderError --> [*]
+    Ok200 --> [*]
+```
+
+### 6. Save Favorite Location — `POST /api/weather/save-favorite-location`
+
+```mermaid
+stateDiagram-v2
+    [*] --> CsrfCheck
+    CsrfCheck --> Rejected403 : missing or invalid token
+    CsrfCheck --> AuthCheck : valid
+    AuthCheck --> Unauthorized401 : no valid access token
+    AuthCheck --> LoadUser : authenticated
+    LoadUser --> Unauthorized401 : user not found
+    LoadUser --> LimitCheck : found
+    LimitCheck --> Forbidden403 : limit reached, 10 by default
+    LimitCheck --> DuplicateCheck : below limit
+    DuplicateCheck --> Conflict409 : same city and country already saved
+    DuplicateCheck --> Saved200 : insert row, counter plus 1
+    Rejected403 --> [*]
+    Unauthorized401 --> [*]
+    Forbidden403 --> [*]
+    Conflict409 --> [*]
+    Saved200 --> [*]
+```
+
+- Body: `{ cityName, countryName }`. The limit comes from `favorite.location.max`, checked against `users.favorite_city_counter`.
+- The insert and the counter update run in one transaction. The city is stored as sent. It is not validated or geocoded on save.
+
+### 7. Remove Favorite Location — `DELETE /api/weather/remove-favorite-location`
+
+```mermaid
+stateDiagram-v2
+    [*] --> CsrfCheck
+    CsrfCheck --> Rejected403 : missing or invalid token
+    CsrfCheck --> AuthCheck : valid
+    AuthCheck --> Unauthorized401 : no valid access token
+    AuthCheck --> LoadUser : authenticated
+    LoadUser --> NotFound404 : user not found
+    LoadUser --> DeleteRows : found
+    DeleteRows --> NotFound404 : no matching favorite
+    DeleteRows --> Removed200 : counter minus deleted rows
+    Rejected403 --> [*]
+    Unauthorized401 --> [*]
+    NotFound404 --> [*]
+    Removed200 --> [*]
+```
+
+Same body as save. Rows are matched on user, `cityName` and `countryName`, all in one transaction.
+
+### 8. Get Favorite Locations — `GET /api/weather/get-user-favorite-location`
+
+```mermaid
+stateDiagram-v2
+    [*] --> AuthCheck
+    AuthCheck --> Unauthorized401 : no valid access token
+    AuthCheck --> LoadFavorites : authenticated
+    LoadFavorites --> Ok200 : no rows, empty list
+    LoadFavorites --> CityWeather : one or more rows
+    CityWeather --> CityWeather : next row
+    CityWeather --> Ok200 : all rows resolved
+    CityWeather --> Failed : any lookup fails
+    Unauthorized401 --> [*]
+    Failed --> [*] : whole request returns that error
+    Ok200 --> [*]
+```
+
+Each favorite goes through the **Weather by City** flow (flow 1), including its geocoding and city caches, one by one. If one city fails (404 or a provider error), the whole request fails. There is no partial result. The response is a list of `{ cityName, countryName, weather }`.
+
+### Weather Error Summary
+
+| Status | Cause |
+|---|---|
+| `400` | Invalid query parameters (Bean Validation on the controller) |
+| `401` | Favorites endpoint without a valid access token, or save for an unknown user |
+| `403` | Missing CSRF token on save/remove, or favorite limit reached |
+| `404` | City not found by geocoding, unknown user on remove, or favorite to remove does not exist |
+| `409` | Favorite already saved |
+| `502` | Provider HTTP error, unparseable or empty response |
+| `503` | Provider rate limit (HTTP 429) |
+| `504` | Provider timeout or connection error |
+
+---
+
 ## Security
 
 | Mechanism | Implementation |
@@ -256,13 +467,16 @@ Base path: `/api/auth`. All endpoints are public at the security layer. All `POS
 
 Any `POST` without a valid CSRF token returns `403`.
 
-### Weather — `/api/weather` (public, `GET` only)
+### Weather — `/api/weather`
 
-| Path | Params | Description | Cache |
-|---|---|---|---|
-| `/coordinates` | `lat`, `lon`, `refresh` (optional) | Current weather + forecast for the visitor's location. `refresh=true` replaces the cached location | `weather:session:{sessionId}` |
-| `/city` | `name`, `country` (ISO 3166 alpha-2) | Resolves the city with OpenWeather Geocoding, then returns its weather | `weather:city:{lat,lon}` (shared) |
-| `/locations` | `query` (min 2 chars) | Up to 5 `{ name, country }` prefix matches (Open-Meteo Geocoding) | `weather:locations:{prefix}` (24h) |
+| Method | Path | Params / Body | Access | Description | Cache |
+|---|---|---|---|---|---|
+| `GET` | `/coordinates` | `lat`, `lon` | Public | Current weather + forecast for the visitor's location | `weather:session:{sessionId}` |
+| `GET` | `/city` | `cityName`, `countryName` (ISO 3166 alpha-2) | Public | Resolves the city with OpenWeather Geocoding, then returns its weather | `weather:city:{lat,lon}` (shared) |
+| `GET` | `/city-suggestion` | `query` (2–60 chars) | Public | Up to 5 `{ name, country }` prefix matches (Open-Meteo Geocoding) | `weather:locations:{prefix}` (24h) |
+| `POST` | `/save-favorite-location` | `{ cityName, countryName }` | JWT + CSRF | Saves a favorite location | — |
+| `DELETE` | `/remove-favorite-location` | `{ cityName, countryName }` | JWT + CSRF | Removes a favorite location | — |
+| `GET` | `/get-user-favorite-location` | — | JWT | Favorite locations with their current weather | Via `/city` caches |
 
 Weather entries expire at the **next full hour in the location's timezone**. Every visitor gets a random `weather_session` cookie (HttpOnly, 30 days). It only keys the personal weather cache, is independent of the JWTs and CSRF token, and is not changed by sign-in or sign-out.
 

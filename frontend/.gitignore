@@ -39,3 +39,20 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# secrets & credentials
+secrets/
+credentials*.json
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.iml

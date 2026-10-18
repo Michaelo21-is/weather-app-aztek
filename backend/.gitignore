@@ -34,3 +34,16 @@ build/
 
 ### Secrets ###
 .env
+.env.*
+!.env.example
+secrets/
+credentials*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+### Logs ###
+*.log

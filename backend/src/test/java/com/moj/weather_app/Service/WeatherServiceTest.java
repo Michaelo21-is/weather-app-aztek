@@ -137,6 +137,7 @@ class WeatherServiceTest {
 
         assertThat(weather.location().utcOffsetSeconds()).isEqualTo(19800);
         assertThat(redis.ttls.get("weather:session:" + SESSION_ID)).isEqualTo(Duration.ofMinutes(15));
+        assertThat(redis.ttls.get("weather:city:IN:new delhi")).isEqualTo(Duration.ofMinutes(15));
     }
 
     @Test
@@ -162,9 +163,93 @@ class WeatherServiceTest {
         assertThat(weather.location().name()).isEqualTo("London");
         assertThat(weather.location().state()).isEqualTo("England");
         assertThat(weather.location().country()).isEqualTo("GB");
-        assertThat(redis.values).containsKeys("weather:city:51.5073,-0.1276", "weather:geocode:GB:london");
-        assertThat(redis.ttls.get("weather:city:51.5073,-0.1276")).isEqualTo(Duration.ofMinutes(45));
+        assertThat(redis.values).containsKeys("weather:city:GB:london", "weather:geocode:GB:london");
+        assertThat(redis.ttls.get("weather:city:GB:london")).isEqualTo(Duration.ofMinutes(45));
         assertThat(redis.values.keySet()).noneMatch(key -> key.startsWith("weather:session:"));
+    }
+
+    @Test
+    void coordinatesSearchIsReusedByCitySearchWithoutProviderCalls() {
+        stubWeather(51.5123, -0.1187, "London", "GB", 0);
+        WeatherResponse byCoordinates = service.getWeatherByCoordinates(SESSION_ID, 51.5123, -0.1187);
+
+        WeatherResponse byCity = service.getWeatherByCity("london", "gb");
+
+        assertThat(byCity.current()).isEqualTo(byCoordinates.current());
+        assertThat(byCity.daily()).isEqualTo(byCoordinates.daily());
+        assertThat(byCity.location().name()).isEqualTo("London");
+        // Other visitors get a coarse position, not the searcher's own.
+        assertThat(byCity.location().lat()).isEqualTo(51.5);
+        assertThat(byCity.location().lon()).isEqualTo(-0.1);
+        assertThat(redis.ttls.get("weather:city:GB:london")).isEqualTo(Duration.ofMinutes(45));
+        verify(openWeatherClient, never()).geocode(anyString(), anyString());
+        verify(openWeatherClient, times(1)).currentWeather(anyDouble(), anyDouble());
+        verify(openWeatherClient, times(1)).forecast(anyDouble(), anyDouble());
+    }
+
+    @Test
+    void coordinatesSearchKeepsExistingCityEntry() {
+        when(openWeatherClient.geocode("London", "GB")).thenReturn(List.of(
+                new GeocodingResult("London", null, 51.5073219, -0.1276474, "GB", "England")));
+        stubWeather(51.5073219, -0.1276474, "London", "GB", 0);
+        stubWeather(51.5123, -0.1187, "London", "GB", 0);
+        WeatherResponse geocoded = service.getWeatherByCity("London", "GB");
+
+        service.getWeatherByCoordinates(SESSION_ID, 51.5123, -0.1187);
+
+        assertThat(service.getWeatherByCity("London", "GB")).isEqualTo(geocoded);
+        assertThat(geocoded.location().state()).isEqualTo("England");
+    }
+
+    @Test
+    void coordinatesWithoutPlaceNameAreNotSharedWithCitySearches() {
+        stubWeather(0, 0, "", "", 0);
+
+        service.getWeatherByCoordinates(SESSION_ID, 0, 0);
+
+        assertThat(redis.values.keySet()).containsExactly("weather:session:" + SESSION_ID);
+    }
+
+    @Test
+    void sameCityNameInDifferentCountriesDoesNotCollide() {
+        stubWeather(42.98, -81.25, "London", "CA", -14400);
+        when(openWeatherClient.geocode("London", "GB")).thenReturn(List.of(
+                new GeocodingResult("London", null, 51.5073219, -0.1276474, "GB", "England")));
+        stubWeather(51.5073219, -0.1276474, "London", "GB", 0);
+        service.getWeatherByCoordinates(SESSION_ID, 42.98, -81.25);
+
+        WeatherResponse britishLondon = service.getWeatherByCity("London", "GB");
+        WeatherResponse canadianLondon = service.getWeatherByCity("London", "CA");
+
+        assertThat(britishLondon.location().country()).isEqualTo("GB");
+        assertThat(britishLondon.location().lat()).isEqualTo(51.5073219);
+        assertThat(canadianLondon.location().country()).isEqualTo("CA");
+        assertThat(redis.values).containsKeys("weather:city:GB:london", "weather:city:CA:london");
+        verify(openWeatherClient, times(1)).geocode(anyString(), anyString());
+    }
+
+    @Test
+    void cityKeyIgnoresCaseAccentsAndSpacing() {
+        assertThat(WeatherService.cityKey("  São   Paulo ", "br"))
+                .isEqualTo(WeatherService.cityKey("sao paulo", "BR"))
+                .isEqualTo("weather:city:BR:sao paulo");
+    }
+
+    @Test
+    void cityAliasesShareTheGeocodedNameEntry() {
+        when(openWeatherClient.geocode("Munich", "DE")).thenReturn(List.of(
+                new GeocodingResult("München", Map.of("en", "Munich"), 48.137, 11.575, "DE", "Bavaria")));
+        stubWeather(48.137, 11.575, "Munich", "DE", 7200);
+        WeatherResponse first = service.getWeatherByCity("Munich", "DE");
+
+        WeatherResponse alias = service.getWeatherByCity("Munich", "DE");
+        WeatherResponse geocodedName = service.getWeatherByCity("Munchen", "de");
+
+        assertThat(alias).isEqualTo(first);
+        assertThat(geocodedName).isEqualTo(first);
+        assertThat(redis.values).containsKey("weather:city:DE:munchen");
+        verify(openWeatherClient, times(1)).geocode(anyString(), anyString());
+        verify(openWeatherClient, times(1)).currentWeather(anyDouble(), anyDouble());
     }
 
     @Test

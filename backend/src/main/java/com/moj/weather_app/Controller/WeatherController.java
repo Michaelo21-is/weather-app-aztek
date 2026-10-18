@@ -30,7 +30,7 @@ public class WeatherController {
         this.weatherService = weatherService;
     }
 
-    /** Weather for the visitor's location, cached per weather session. {@code refresh=true} replaces the cache. */
+    /** Weather for the visitor's location, cached per weather session and shared with searches for its city. */
     @GetMapping("/coordinates")
     public WeatherResponse byCoordinates(
             @RequestParam @DecimalMin("-90") @DecimalMax("90") double lat,

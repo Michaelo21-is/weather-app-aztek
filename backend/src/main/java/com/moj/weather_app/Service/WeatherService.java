@@ -37,6 +37,8 @@ public class WeatherService {
     static final String GEOCODING_KEY_PREFIX = "weather:geocode:";
     static final String LOCATIONS_KEY_PREFIX = "weather:locations:";
     static final int MAX_SUGGESTIONS = 5;
+    // A position shared with city searches is rounded to 0.1° (about 11 km) so it does not reveal where the visitor is.
+    private static final double SHARED_COORDINATE_PRECISION = 10;
     // Extra candidates so duplicates (same name and country) can be dropped while still filling every slot.
     private static final int AUTOCOMPLETE_CANDIDATES = 10;
 
@@ -81,14 +83,25 @@ public class WeatherService {
         WeatherResponse weather = WeatherMapper.toResponse(current, forecast,
                 WeatherMapper.coordinatesLocation(current, forecast, lat, lon), properties.units(), clock.instant());
         cacheUntilNextFullHour(key, weather);
+        shareWithCitySearches(weather);
         return weather;
     }
 
-    /** Resolves the city via geocoding, then serves its weather from the cache shared by all visitors. */
+    /**
+     * Serves a city's weather from the cache shared by all visitors, keyed by city and country name. The name as
+     * requested is tried first, so a city already cached (also by a coordinates search) needs no geocoding. Otherwise
+     * the city is geocoded and cached under its geocoded name, so aliases (e.g. Munich and München) share one entry.
+     */
     public WeatherResponse getWeatherByCity(String cityName, String countryCode) {
-        ResolvedCity city = resolveCity(cityName.trim(), countryCode.toUpperCase(Locale.ROOT));
-        String key = CITY_KEY_PREFIX + city.id();
-        WeatherResponse cached = readCache(key, WeatherResponse.class);
+        String country = countryCode.toUpperCase(Locale.ROOT);
+        String requestedKey = cityKey(cityName, country);
+        WeatherResponse cached = readCache(requestedKey, WeatherResponse.class);
+        if (cached != null) {
+            return cached;
+        }
+        ResolvedCity city = resolveCity(cityName.trim(), country);
+        String key = cityKey(city.name(), city.country());
+        cached = key.equals(requestedKey) ? null : readCache(key, WeatherResponse.class);
         if (cached != null) {
             return cached;
         }
@@ -219,6 +232,35 @@ public class WeatherService {
                 .trim();
     }
 
+    /** The shared city cache key: one per city and country, ignoring case, accents and repeated spaces in the name. */
+    static String cityKey(String cityName, String countryCode) {
+        return CITY_KEY_PREFIX + countryCode.trim().toUpperCase(Locale.ROOT) + ":"
+                + normalizeName(cityName).replaceAll("\\s+", " ");
+    }
+
+    /**
+     * Also caches a position's weather for searches of the place OpenWeather names for it, unless that city is already
+     * cached (a geocoded city search entry is kept). The entry is served to everyone, so the coordinates are coarsened.
+     */
+    private void shareWithCitySearches(WeatherResponse weather) {
+        WeatherResponse.Location location = weather.location();
+        if (location.name() == null || location.country() == null) {
+            return;
+        }
+        String key = cityKey(location.name(), location.country());
+        if (readCache(key, WeatherResponse.class) != null) {
+            return;
+        }
+        WeatherResponse.Location coarse = new WeatherResponse.Location(location.name(), location.state(),
+                location.country(), coarsen(location.lat()), coarsen(location.lon()), location.utcOffsetSeconds());
+        cacheUntilNextFullHour(key, new WeatherResponse(coarse, weather.current(), weather.hourly(), weather.daily(),
+                weather.units(), weather.fetchedAt()));
+    }
+
+    private static double coarsen(double coordinate) {
+        return Math.round(coordinate * SHARED_COORDINATE_PRECISION) / SHARED_COORDINATE_PRECISION;
+    }
+
     private void cacheUntilNextFullHour(String key, WeatherResponse weather) {
         Duration ttl = WeatherCacheTtl.untilNextFullHour(clock.instant(), weather.location().utcOffsetSeconds());
         writeCache(key, weather, ttl);
@@ -243,10 +285,6 @@ public class WeatherService {
         }
     }
 
-    /** The geocoding API has no city IDs, so the stable geocoded coordinates identify a city. */
     record ResolvedCity(String name, String state, String country, double lat, double lon) {
-        String id() {
-            return String.format(Locale.ROOT, "%.4f,%.4f", lat, lon);
-        }
     }
 }

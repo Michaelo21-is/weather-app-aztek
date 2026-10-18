@@ -219,13 +219,15 @@ Sign out always succeeds and clears the cookies. The access token is stateless, 
 stateDiagram-v2
     [*] --> ValidateParams : cityName, countryName
     ValidateParams --> BadRequest400 : blank, too long, bad characters, or country not 2 letters
-    ValidateParams --> GeocodeCache : valid
+    ValidateParams --> RequestedNameCache : valid
+    RequestedNameCache --> Ok200 : hit
+    RequestedNameCache --> GeocodeCache : miss
     GeocodeCache --> CityCache : hit
     GeocodeCache --> Geocode : miss
     Geocode --> NotFound404 : no result in the requested country
     Geocode --> ProviderError : call failed
     Geocode --> CityCache : pick best match, cache 7d
-    CityCache --> Ok200 : hit
+    CityCache --> Ok200 : hit (geocoded name)
     CityCache --> FetchWeather : miss
     FetchWeather --> ProviderError : call failed
     FetchWeather --> Ok200 : map response, cache until next full local hour
@@ -236,7 +238,8 @@ stateDiagram-v2
 ```
 
 - **Best match:** results are filtered to the requested country. A result named exactly like the query (ignoring case and accents, also checking `local_names`) wins. Otherwise the geocoder's first result is used.
-- The city cache key is the geocoded coordinates (4 decimals), so all visitors share it. The response uses the geocoded name, not the weather API's district name.
+- The city cache key is the country code plus the city name, ignoring case, accents and repeated spaces (`weather:city:GB:london`), so all visitors share it. The requested name is looked up first, so a city that is already cached (also by a coordinates search) needs no geocoding. On a miss, the weather is cached under the geocoded name, so aliases like `Munich` and `München` share one entry. The response uses the geocoded name, not the weather API's district name.
+- Two cities with the same name in one country (e.g. Springfield, US) share one entry, since the request carries no state.
 - `FetchWeather` calls OpenWeather **current weather** and then the **5 day / 3 hour forecast**. If either call fails, the request fails.
 
 ### 2. Weather by Location — `GET /api/weather/coordinates`
@@ -259,6 +262,8 @@ stateDiagram-v2
 ```
 
 The cache is keyed by the visitor's weather session, not by coordinates. While the entry is valid (until the next full local hour), new coordinates from the same visitor return the cached location.
+
+After a fetch, the weather is also cached for city searches under the place name and country OpenWeather returns (`weather:city:<CC>:<name>`, same TTL), unless that city is already cached. Positions without a place name (e.g. at sea) are not shared. Other visitors get this entry, so its coordinates are rounded to 0.1° (about 11 km) and do not reveal the searcher's position.
 
 ### 3. Redis Cache Hit / Miss
 
@@ -287,7 +292,7 @@ A Redis outage does not break the weather endpoints. Every request just goes to 
 | Redis key | Value | TTL |
 |---|---|---|
 | `weather:session:<sessionId>` | Weather for the visitor's location | Until the next full hour in the location's timezone |
-| `weather:city:<lat>,<lon>` | Weather for a city, shared by all visitors | Until the next full hour in the location's timezone |
+| `weather:city:<CC>:<city>` | Weather for a city, shared by all visitors (written by city and coordinates searches) | Until the next full hour in the location's timezone |
 | `weather:geocode:<CC>:<city>` | Resolved city (name, state, country, coordinates) | `weather.geocoding-ttl` (7d) |
 | `weather:locations:<prefix>` | Autocomplete suggestions (also an empty list) | `weather.autocomplete-ttl` (24h) |
 
@@ -471,8 +476,8 @@ Any `POST` without a valid CSRF token returns `403`.
 
 | Method | Path | Params / Body | Access | Description | Cache |
 |---|---|---|---|---|---|
-| `GET` | `/coordinates` | `lat`, `lon` | Public | Current weather + forecast for the visitor's location | `weather:session:{sessionId}` |
-| `GET` | `/city` | `cityName`, `countryName` (ISO 3166 alpha-2) | Public | Resolves the city with OpenWeather Geocoding, then returns its weather | `weather:city:{lat,lon}` (shared) |
+| `GET` | `/coordinates` | `lat`, `lon` | Public | Current weather + forecast for the visitor's location | `weather:session:{sessionId}`, also `weather:city:{CC}:{city}` (shared) |
+| `GET` | `/city` | `cityName`, `countryName` (ISO 3166 alpha-2) | Public | Resolves the city with OpenWeather Geocoding, then returns its weather | `weather:city:{CC}:{city}` (shared) |
 | `GET` | `/city-suggestion` | `query` (2–60 chars) | Public | Up to 5 `{ name, country }` prefix matches (Open-Meteo Geocoding) | `weather:locations:{prefix}` (24h) |
 | `POST` | `/save-favorite-location` | `{ cityName, countryName }` | JWT + CSRF | Saves a favorite location | — |
 | `DELETE` | `/remove-favorite-location` | `{ cityName, countryName }` | JWT + CSRF | Removes a favorite location | — |

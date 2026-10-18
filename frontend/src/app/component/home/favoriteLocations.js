@@ -20,7 +20,7 @@ function normalizeName(name) {
   return name.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
 }
 
-// City weather uses the backend's geocoded coordinates, so a searched city and its saved favorite share them exactly.
+// A searched city and its saved favorite are usually served from the same backend city cache entry, so they share coordinates exactly.
 function sameCoordinates(a, b) {
   return Math.abs(a.lat - b.lat) < 1e-4 && Math.abs(a.lon - b.lon) < 1e-4;
 }

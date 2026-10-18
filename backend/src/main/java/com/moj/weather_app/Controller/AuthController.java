@@ -21,8 +21,8 @@ public class AuthController {
         this.authCookieService = authCookieService;
     }
     @PostMapping("/sign-up")
-    public void signUp(@RequestBody SignUpDto signUpDto){
-        authService.signUp(signUpDto);
+    public void signUp(@RequestBody SignUpDto signUpDto, HttpServletResponse response){
+        authCookieService.addTokenCookies(response, authService.signUp(signUpDto));
     }
 
     @PostMapping("/sign-in")

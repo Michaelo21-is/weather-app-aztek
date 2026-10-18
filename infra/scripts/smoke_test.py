@@ -142,8 +142,10 @@ def full_flow(base, origin):
     c.load_csrf()
     email = f"smoke-{int(time.time())}@example.com"
     password = "Smoke-test-" + str(int(time.time()))
-    status, _, data = c.json("POST", "/api/auth/sign-up", {"email": email, "password": password, "nickname": "Smoke"})
+    status, hdrs, data = c.json("POST", "/api/auth/sign-up", {"email": email, "password": password, "nickname": "Smoke"})
     check(status == 200, f"sign-up {email} -> {status} {data or ''}")
+    signup_cookies = " | ".join(hdrs.get_all("Set-Cookie") or [])
+    check("access_token=" in signup_cookies and "refresh_token=" in signup_cookies, "sign-up issues access and refresh cookies")
     status, _, _ = c.json("POST", "/api/auth/sign-up", {"email": email, "password": password, "nickname": "Smoke"})
     check(status == 409, f"duplicate sign-up -> {status} (expected 409)")
     status, hdrs, _ = c.json("POST", "/api/auth/sign-in", {"email": email, "password": password})

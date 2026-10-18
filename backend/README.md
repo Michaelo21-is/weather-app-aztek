@@ -96,15 +96,16 @@ stateDiagram-v2
     EmailCheck --> Conflict409 : email already exists
     EmailCheck --> HashPassword : email is free
     HashPassword --> SaveUser : BCrypt
-    SaveUser --> Created200 : saved
+    SaveUser --> IssueTokens : saved
     SaveUser --> Error500 : database error
+    IssueTokens --> SignedIn200 : store refresh hash, set cookies
     Rejected403 --> [*]
     Conflict409 --> [*]
-    Created200 --> [*]
+    SignedIn200 --> [*]
     Error500 --> [*]
 ```
 
-Sign up does **not** sign the user in. No tokens are issued.
+Sign up signs the user in: it uses the same `IssueTokens` step as sign in (see below), so the response sets the same `access_token` and `refresh_token` cookies. Saving the user and storing the refresh token hash run in one transaction.
 
 ### 3. Sign In — `POST /api/auth/sign-in`
 
@@ -465,7 +466,7 @@ Base path: `/api/auth`. All endpoints are public at the security layer. All `POS
 | Method | Path | Body | Description | Responses |
 |---|---|---|---|---|
 | `GET` | `/csrf` | — | Returns `{ headerName, token }` and sets the `XSRF-TOKEN` cookie | `200` |
-| `POST` | `/sign-up` | `{ email, password }` | Creates a user with a BCrypt-hashed password | `200`, `409`, `500` |
+| `POST` | `/sign-up` | `{ email, nickname, password }` | Creates a user with a BCrypt-hashed password and sets the `access_token` and `refresh_token` cookies | `200`, `409`, `500` |
 | `POST` | `/sign-in` | `{ email, password }` | Sets the `access_token` and `refresh_token` cookies | `200`, `401`, `429` |
 | `POST` | `/refresh` | — (cookie) | Rotates the token pair | `200`, `401` |
 | `POST` | `/sign-out` | — (cookie) | Revokes the refresh token and clears the cookies | `200` |

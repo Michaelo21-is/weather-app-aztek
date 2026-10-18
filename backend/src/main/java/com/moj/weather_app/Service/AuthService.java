@@ -13,6 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.nio.charset.StandardCharsets;
@@ -39,19 +40,27 @@ public class AuthService {
         this.jwtService = jwtService;
         this.refreshTokenRepository = refreshTokenRepository;
     }
-    public void signUp(SignUpDto signUpDto){
+    /**
+     * Creates the account and signs the user in with the same token pair as {@link #signIn}. Transactional, so
+     * the account is not kept when its first refresh token cannot be stored.
+     */
+    @Transactional
+    public AuthTokens signUp(SignUpDto signUpDto){
         if (usersRepository.existsByEmail(signUpDto.getEmail())){
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Email already exists");
         }
         String encodedPassword = passwordEncoder.encode(signUpDto.getPassword());
         Users users = Users.builder().email(signUpDto.getEmail()).password(encodedPassword).favoriteCityCounter(0).nickname(signUpDto.getNickname()).build();
+        Users saved;
         try {
-            usersRepository.save(users);
+            // Flushed here, so database errors surface in this catch instead of at commit.
+            saved = usersRepository.saveAndFlush(users);
         }
         catch (Exception e){
             log.error("Failed to save user when sign up, error message: \n", e);
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to save user something went wrong, please try again later");
         }
+        return issueTokens(saved);
     }
     public AuthTokens signIn(SignInDto signInDto){
         String email = signInDto.getEmail();

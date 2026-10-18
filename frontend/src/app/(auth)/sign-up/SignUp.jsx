@@ -2,7 +2,6 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import signInRequest from "@/app/api/auth/signIn";
 import signUpRequest from "@/app/api/auth/signUp";
 import AuthCard, { AuthSubmitButton } from "@/app/component/auth/AuthCard";
 import AuthField from "@/app/component/auth/AuthField";
@@ -47,25 +46,12 @@ export default function SignUp() {
     }
 
     setLoading(true);
-    const credentials = { email: form.email.trim(), password: form.password };
+    // Like sign-in, a successful sign-up sets the access and refresh token cookies, so the user is signed in.
     try {
-      await signUpRequest({ nickname: form.nickname.trim(), ...credentials });
+      await signUpRequest({ nickname: form.nickname.trim(), email: form.email.trim(), password: form.password });
     } catch (e) {
       showToast({ variant: "error", title: "Couldn't create your account", message: describeSignUpError(e) });
       setLoading(false);
-      return;
-    }
-
-    // Sign-up only creates the account; signing in right away sets the session cookies.
-    try {
-      await signInRequest(credentials);
-    } catch {
-      showToast({
-        variant: "info",
-        title: "Your account is ready",
-        message: "Sign in with your new email and password to continue.",
-      });
-      router.push("/sign-in");
       return;
     }
 

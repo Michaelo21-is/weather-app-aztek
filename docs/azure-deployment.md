@@ -319,8 +319,8 @@ Testing on the `*.azurewebsites.net` hostname: the web app only admits Cloudflar
 * **Push to main**: the same, then images are built only for components whose directory changed (tag = last commit of
   that directory), pushed to ACR, deployed with `infra/scripts/deploy-images.sh`, and checked with
   `infra/scripts/smoke_test.py` through Cloudflare.
-* Azure sign-in: OpenID Connect with the user-assigned identity `id-weather-prod-neu-github` (federated credential for
-  `repo:Michaelo21-is/weather-app-aztek:ref:refs/heads/main`), allowed to push to ACR and update the two apps only.
+* Azure sign-in: OpenID Connect with the user-assigned identity `id-weather-prod-neu-github` (federated credential for the
+  GitHub immutable-ID subject `repo:Michaelo21-is@195190202/weather-app-aztek@1424114203:ref:refs/heads/main`), allowed to push to ACR and update the two apps only.
 * Repository **variables** (identifiers, no secrets): `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
   `AZURE_RESOURCE_GROUP`, `ACR_NAME`, `WEB_APP_NAME`, `API_APP_NAME`, `PUBLIC_URL`. The repository has no secrets.
 * Infrastructure changes are not applied from CI: they go through `infra/scripts/tf.sh` (plan, review, apply).
@@ -393,6 +393,8 @@ rotation, sign-out. On the Azure hostname the login limiter was also verified to
 | Redis `WRONGPASS` | the password contains a backslash, which Redis interprets inside double quotes | start script writes the value in single quotes |
 | Redis unreachable on `localhost` | App Service forwards sidecar `localhost` to the container interface | Redis binds `0.0.0.0` (protected by the app boundary and the password) |
 | Backend restart loop, CPU 100 % | JVM cold start > 300 s on one B1 core | C1-only JIT + SerialGC, start limit 1800 s |
+| CI login `AADSTS700213` | GitHub sends immutable-ID OIDC subjects (`owner@id/repo@id`) | federated credential uses that subject (`github_oidc_repository`) |
+| CI `./mvnw: Permission denied` | wrapper committed without the executable bit | `git update-index --chmod=+x backend/mvnw` |
 | Scripts failed in Git Bash | MSYS path conversion of `/subscriptions/…` and `/CN=…`, stale `OPENSSL_CONF` | `MSYS_NO_PATHCONV=1`, ignore a dangling `OPENSSL_CONF` |
 
 ## AI-assisted development

@@ -46,6 +46,15 @@ variable "github_repository" {
   default     = "Michaelo21-is/weather-app-aztek"
 }
 
+variable "github_oidc_repository" {
+  description = <<-EOT
+    Repository part of the GitHub OIDC subject claim. GitHub issues immutable-ID subjects
+    ("<owner>@<owner_id>/<repo>@<repo_id>"), so a renamed or re-created repository can't reuse this trust.
+  EOT
+  type        = string
+  default     = "Michaelo21-is@195190202/weather-app-aztek@1424114203"
+}
+
 variable "image_tag" {
   description = "Initial image tag. Later deployments come from CI, and Terraform ignores the running tag."
   type        = string

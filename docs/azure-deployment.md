@@ -23,7 +23,7 @@ flowchart LR
   cf -->|HTTPS, Full strict, Origin CA cert<br/>only Cloudflare IPs accepted| web
 
   subgraph azure[Azure · North Europe · aztek-app-rg]
-    subgraph plan[App Service plan · Linux B1]
+    subgraph plan[App Service plan · Linux B2]
       web[app-weather-web<br/>Next.js standalone<br/>proxies /api/*]
       subgraph apiapp[app-weather-api]
         api[Spring Boot<br/>main container]
@@ -66,7 +66,7 @@ including role assignments, secrets, subnets and bindings that are not separate 
 
 | Service | Name | SKU / role |
 |---|---|---|
-| App Service plan | `asp-weather-prod-neu` | Linux B1 (1 vCPU, 1.75 GB) |
+| App Service plan | `asp-weather-prod-neu` | Linux B2 (2 vCPU, 3.5 GB) |
 | Web app (frontend) | `app-weather-web-prod-c66006` | Next.js container, custom domain `michael-site.com` |
 | Web app (backend) | `app-weather-api-prod-c66006` | Spring Boot container + Redis sidecar, private |
 | PostgreSQL Flexible Server | `psql-weather-prod-neu-c66006` | PostgreSQL 17, Burstable B1ms, 32 GiB, private, database `weatherdb` |
@@ -104,6 +104,8 @@ Also considered: *Static Web Apps* (free tier can't proxy to a private backend),
 the app only uses Redis as a cache and for login counters, so a sidecar is enough), and *code-based App Service
 deployments without Docker* (same cost; Docker was kept for identical local/CI/production artifacts).
 
+The plan was later scaled up from B1 to B2 (+$12.41/month), see [Capacity of the B2 plan](#capacity-of-the-b2-plan).
+
 ## Region
 
 West Europe and Germany West Central offer **no PostgreSQL Burstable SKUs to this subscription**
@@ -128,7 +130,7 @@ Low traffic (≤ ~50k page views and ≤ ~200k API calls per month, database < 1
 
 | Service | SKU / configuration | USD / month | Source |
 |---|---|---:|---|
-| App Service plan (Linux) | B1 · 1 instance · 730 h × $0.018 | 13.14 | verified (Retail Prices API) |
+| App Service plan (Linux) | B2 · 1 instance · 730 h × $0.035 | 25.55 | verified (Retail Prices API) |
 | PostgreSQL Flexible Server | Burstable B1ms · 730 h × $0.018 | 13.14 | verified |
 | PostgreSQL storage | 32 GiB Premium SSD (P4), auto-grow | ≈ 4.05 | **estimate**: meter not in the API; flexible-server storage rate $0.1265/GB |
 | PostgreSQL backups | 7-day PITR + geo-redundant copy | 0.00–0.50 | free up to 100 % of provisioned storage (LRS $0.095/GB verified); geo copy **estimated** |
@@ -142,20 +144,21 @@ Low traffic (≤ ~50k page views and ≤ ~200k API calls per month, database < 1
 | Terraform state | Storage LRS, < 1 MB | ≈ 0.02 | verified ($0.022/GB) |
 | Outbound data | first 100 GB/month free | 0.00 | |
 | Cloudflare | Free plan | 0.00 | |
-| **Total** | | **≈ 36.80 / month · ≈ 1.21 / day** | |
+| **Total** | | **≈ 49.21 / month · ≈ 1.62 / day** (≈ 36.80 with B1) | |
 
 Higher traffic (≈ 500k page views, 2–3M API calls per month):
 
 | Change | USD / month |
 |---|---:|
-| App Service B1 → B2 (2 vCPU, 3.5 GB) | +12.41 |
+| App Service B2 → B3 (4 vCPU, 7 GB) | +25.55 |
 | Log Analytics ~10 GB (cap raised) | +0 to +13.80 |
 | PostgreSQL B1ms → B2s, only if CPU credits run out (alert configured) | +39.42 |
-| **Total** | **≈ 49 – 63** (≈ 103 with B2s) |
+| **Total** | **≈ 75 – 89** (≈ 128 with B2s) |
 
 Possible extra charges: outbound data above 100 GB/month ($0.087/GB), Log Analytics above 5 GB, storage auto-grow,
 OpenWeather beyond the free plan (1M calls/month, 60/min; the backend caches each city for up to an hour). A resource
-group **budget of $45/month** with notifications at 50/80/100 % and a forecast alert guards the spending limit.
+group **budget of $45/month** with notifications at 50/80/100 % and a forecast alert guards the spending limit (set
+for B1: with B2 the estimate is above it, so the forecast alert is expected to fire).
 
 ## Global latency
 
@@ -186,11 +189,11 @@ Known trade-offs: Key Vault keeps its public endpoint (RBAC-only) because a priv
 backend connects with the PostgreSQL administrator login from `.env` (reused as required) instead of a separate
 least-privilege role.
 
-## Capacity of the B1 plan
+## Capacity of the B2 plan
 
-B1 = 1 vCPU and 1.75 GB RAM shared by the Next.js container, the Spring Boot container and the Redis sidecar. Measured
-locally with all three containers pinned to **one shared CPU core**, under a mix of page loads, weather lookups,
-autocomplete and wrong-password sign-ins (full BCrypt checks), with keep-alive connections:
+B2 = 2 vCPUs and 3.5 GB RAM shared by the Next.js container, the Spring Boot container and the Redis sidecar. Measured
+locally for B1 sizing, with all three containers pinned to **one shared CPU core**, under a mix of page loads, weather
+lookups, autocomplete and wrong-password sign-ins (full BCrypt checks), with keep-alive connections:
 
 | Load | Throughput | p95 latency (weather / sign-in) | Errors | Peak memory (web + api + redis) |
 |---|---|---|---|---|
@@ -202,12 +205,20 @@ autocomplete and wrong-password sign-ins (full BCrypt checks), with keep-alive c
 The JVM heap is capped at 512 MB (`-Xmx512m`) and Redis at 128 MB, so memory can't exceed ≈ 1 GB, leaving room for the
 App Service runtime.
 
-Measured on Azure: warm requests are fast (pages ≈ 0.3 s, cached weather ≈ 0.6–0.9 s end to end from Israel), but a
-**cold start is slow on the single B1 core**: Spring Boot needs ≈ 2–2.5 minutes (12 s on a desktop core), and during a
-restart App Service runs the old and new containers side by side. Mitigations in place: `-XX:TieredStopAtLevel=1
--XX:+UseSerialGC` (cut startup from ≈ 4–5 min to ≈ 2 min) and `WEBSITES_CONTAINER_START_TIME_LIMIT=1800` (no
-kill-and-restart loop). The old container keeps serving until the new one is healthy, so a backend deployment shows up
-as slow responses for a few minutes rather than an outage. Upgrade path if that matters: B2 (+$12.41/month) or P0v3.
+Measured on Azure (request times are server side, from the HTTP logs; from Israel add ≈ 0.15–0.3 s of network):
+
+| | B1 (before) | B2 (now) |
+|---|---|---|
+| Spring Boot start (`Started WeatherAppApplication in`) | 87–257 s | 28.5–30 s |
+| CPU during a backend restart | 99 % for 5+ minutes | 52–80 % for ≈ 1 minute |
+| Memory used by the plan | 80–88 % of 1.75 GB | 60–67 % of 3.5 GB |
+| First sign-up after a restart | 11.3–16.3 s | 2.7 s |
+| Later sign-ups | 0.5–1.1 s, 1.7–4 s while a restart was running | 0.33–0.37 s |
+
+During a restart App Service runs the old and new containers side by side and switches over once the new one answers,
+so a backend deployment is not an outage. `-XX:TieredStopAtLevel=1 -XX:+UseSerialGC` (they cut the B1 start from
+≈ 4–5 min to ≈ 2 min) and `WEBSITES_CONTAINER_START_TIME_LIMIT=1800` (no kill-and-restart loop) are kept. Next steps if
+needed: B3 (+$25.55/month) or P0v3.
 
 ## High availability and recovery
 
@@ -393,6 +404,7 @@ rotation, sign-out. On the Azure hostname the login limiter was also verified to
 | Redis `WRONGPASS` | the password contains a backslash, which Redis interprets inside double quotes | start script writes the value in single quotes |
 | Redis unreachable on `localhost` | App Service forwards sidecar `localhost` to the container interface | Redis binds `0.0.0.0` (protected by the app boundary and the password) |
 | Backend restart loop, CPU 100 % | JVM cold start > 300 s on one B1 core | C1-only JIT + SerialGC, start limit 1800 s |
+| First sign-up after a restart 11–16 s | B1 starved: one slow core and 80–88 % memory for all containers; the backend took 90–260 s to start | plan scaled to B2: start ≈ 29 s, first sign-up ≈ 2.7 s (a startup warm-up was tried and removed: the platform routed traffic before it finished) |
 | CI login `AADSTS700213` | GitHub sends immutable-ID OIDC subjects (`owner@id/repo@id`) | federated credential uses that subject (`github_oidc_repository`) |
 | CI `./mvnw: Permission denied` | wrapper committed without the executable bit | `git update-index --chmod=+x backend/mvnw` |
 | Scripts failed in Git Bash | MSYS path conversion of `/subscriptions/…` and `/CN=…`, stale `OPENSSL_CONF` | `MSYS_NO_PATHCONV=1`, ignore a dangling `OPENSSL_CONF` |

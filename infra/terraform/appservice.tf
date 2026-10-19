@@ -1,4 +1,4 @@
-# One Linux B1 plan hosts both apps (billed per plan, not per app):
+# One Linux B2 plan hosts both apps (billed per plan, not per app):
 #   web: Next.js; public, but only Cloudflare's edge may connect; proxies /api/* to the api app.
 #   api: Spring Boot (main container) + Redis (sidecar on localhost); only the web app's subnet may connect.
 # The sites are azapi resources because azurerm_linux_web_app stores the site publishing credentials in the state.
@@ -8,7 +8,7 @@ resource "azurerm_service_plan" "main" {
   location            = local.location
   resource_group_name = local.rg
   os_type             = "Linux"
-  sku_name            = "B1"
+  sku_name            = "B2"
   worker_count        = 1
   tags                = local.tags
 
@@ -138,11 +138,11 @@ resource "azapi_resource" "api" {
           # Client IP for the login limiter: set by Cloudflare, passed through by the Next.js proxy.
           { name = "FORWARD_HEADERS_STRATEGY", value = "native" },
           { name = "CLIENT_IP_HEADER", value = "CF-Connecting-IP" },
-          # B1 has 1 vCPU and 1.75 GB for all containers: a fixed heap leaves room for Next.js and Redis, the C1-only JIT
-          # and the serial collector roughly halve the CPU the JVM needs to start on a single core.
+          # B2 has 2 slow vCPUs and 3.5 GB for all containers: a fixed heap leaves room for Next.js and Redis, the C1-only
+          # JIT and the serial collector cut the CPU the JVM needs to start (chosen on B1, where they halved it).
           { name = "JAVA_TOOL_OPTIONS", value = "-Xms128m -Xmx512m -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError" },
           { name = "WEBSITES_ENABLE_APP_SERVICE_STORAGE", value = "false" },
-          # A cold start on the single B1 core can take minutes; the platform maximum avoids a kill-and-restart loop.
+          # A cold start on the slow Basic-tier cores can take minutes; the platform maximum avoids a kill-and-restart loop.
           { name = "WEBSITES_CONTAINER_START_TIME_LIMIT", value = "1800" },
         ]
       })
